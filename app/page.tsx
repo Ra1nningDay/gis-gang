@@ -1,4 +1,4 @@
-import { BusStopsMap } from "./components/BusStopsMap";
+import { SatelliteMap } from "./components/SatelliteMap";
 
 export default function Home() {
   return (
@@ -11,9 +11,10 @@ export default function Home() {
             </h1>
             <p className="mt-2 text-sm leading-6 text-slate-600">
               A local GeoServer + PostGIS learning lab rendered in Next.js with
-              MapLibre. The map below reads the published{" "}
-              <span className="font-mono text-slate-900">lab:bus_stops</span>{" "}
-              WFS GeoJSON layer through a Next.js API proxy.
+              MapLibre. The map below uses OpenStreetMap as a base layer and
+              overlays published GeoServer WMS raster layers from the{" "}
+              <span className="font-mono text-slate-900">lab</span>{" "}
+              workspace.
             </p>
           </div>
           <nav className="flex flex-wrap gap-2 text-sm font-medium">
@@ -37,7 +38,7 @@ export default function Home() {
         </header>
 
         <div className="grid flex-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-          <BusStopsMap />
+          <SatelliteMap />
 
           <aside className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="text-sm font-semibold text-slate-950">
@@ -45,25 +46,26 @@ export default function Home() {
             </h2>
             <ol className="mt-4 space-y-3 text-sm text-slate-600">
               <li>
-                <span className="font-mono text-slate-950">PostGIS</span>{" "}
-                stores point geometry in{" "}
-                <span className="font-mono text-slate-950">bus_stops</span>.
+                Local GeoTIFF files live in{" "}
+                <span className="font-mono text-slate-950">/data</span> and
+                are mounted read-only into GeoServer.
               </li>
               <li>
                 <span className="font-mono text-slate-950">GeoServer</span>{" "}
-                publishes the table as WFS GeoJSON.
+                publishes the GeoTIFF as a WMS raster layer.
               </li>
               <li>
                 <span className="font-mono text-slate-950">Next.js</span>{" "}
-                proxies the WFS request at{" "}
+                proxies WMS tiles at{" "}
                 <span className="font-mono text-slate-950">
-                  /api/bus-stops
+                  /api/satellite-wms
                 </span>
                 .
               </li>
               <li>
                 <span className="font-mono text-slate-950">MapLibre</span>{" "}
-                renders the points and popups in the browser.
+                renders OpenStreetMap tiles, the satellite raster, and an
+                extent outline for the GeoTIFF.
               </li>
             </ol>
 
@@ -76,9 +78,11 @@ export default function Home() {
                 <span className="font-mono text-slate-950">
                   docker compose up -d
                 </span>{" "}
-                and publish{" "}
-                <span className="font-mono text-slate-950">lab:bus_stops</span>{" "}
-                before opening this page.
+                and publish at least one raster layer in the{" "}
+                <span className="font-mono text-slate-950">
+                  lab
+                </span>{" "}
+                workspace before opening this page.
               </p>
             </div>
           </aside>

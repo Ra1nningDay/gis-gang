@@ -6,7 +6,7 @@
 - GeoServer: publish ข้อมูล GIS ออกเป็น WMS/WFS/GeoJSON
 - pgAdmin: ดู database และลอง query PostGIS
 
-Next.js app ยังอยู่ในโปรเจกต์ แต่รอบนี้ยังไม่แตะ UI.
+Next.js app แสดง GeoTIFF จาก local `data/` ผ่าน GeoServer WMS บน MapLibre.
 
 ## Requirements
 
@@ -37,7 +37,8 @@ docker compose up -d
 
 ## View the Data in Next.js
 
-The Next.js app renders the published `lab:bus_stops` layer with MapLibre.
+The Next.js app renders OpenStreetMap as the base map and overlays the
+published `lab:satellite_20241012` WMS raster layer with MapLibre.
 
 Start the app:
 
@@ -47,13 +48,18 @@ pnpm dev
 
 Open <http://localhost:3000>.
 
-The page calls the local proxy endpoint:
+The satellite raster is loaded through the local proxy endpoint:
 
 ```text
-http://localhost:3000/api/bus-stops
+http://localhost:3000/api/satellite-wms?bbox=...
 ```
 
-That endpoint forwards to GeoServer WFS and returns GeoJSON to the browser. Click a red bus stop point on the map to see its name.
+That endpoint forwards to GeoServer WMS. The page focuses on the satellite
+extent only, so use `Zoom to satellite` if you pan away from the GeoTIFF area.
+Use the `Satellite` toggle to compare against OpenStreetMap, and adjust
+`Opacity` with the slider or percent input to make the raster blend with the
+base map. The dashed orange box is the GeoTIFF extent, not a clipped polygon
+boundary.
 
 ## Seed Data
 
@@ -131,6 +137,53 @@ JOIN bus_stops b ON a.id < b.id;
 8. Publish layer `bus_stops`
 
 จุดสำคัญคือ GeoServer อยู่ใน container อีกตัว ดังนั้น host ของ database ต้องใช้ชื่อ service ใน Docker network คือ `postgis` ไม่ใช่ `localhost`.
+
+## Publish Local GeoTIFF as WMS
+
+The Docker Compose setup mounts local raster data into GeoServer:
+
+```text
+./data -> /data
+```
+
+Start or recreate the stack after changing `docker-compose.yml`:
+
+```bash
+docker compose up -d
+```
+
+In GeoServer:
+
+1. เข้า <http://localhost:8080/geoserver>
+2. Login ด้วย `admin` / `geoserver`
+3. ไปที่ `Stores`
+4. กด `Add new Store`
+5. เลือก `GeoTIFF`
+6. ใส่ค่าประมาณนี้:
+   - Workspace: `lab`
+   - Data Source Name: `satellite_20241012`
+   - URL: `file:///data/drive-download-20260702T033920Z-3-002/IMG_T2V_20241012033956_ORTHO_PMS_32_2.tif`
+7. กด `Save`
+8. Publish layer `satellite_20241012`
+9. ตั้ง Declared SRS เป็น `EPSG:32647`
+10. กด `Compute from native bounds`
+11. กด `Compute from lat/lon bounds`
+12. กด `Save`
+
+WMS preview URL:
+
+```text
+http://localhost:8080/geoserver/lab/wms?service=WMS&version=1.1.0&request=GetMap&layers=lab:satellite_20241012&styles=&bbox=100.426870,14.649284,100.454905,14.676227&width=768&height=512&srs=EPSG:4326&format=image/png
+```
+
+MapLibre uses local WMS proxy tiles from:
+
+```text
+http://localhost:3000/api/satellite-wms?bbox={bbox-epsg-3857}
+```
+
+The current CRS assumption is `EPSG:32647`. If the image appears in the wrong
+place, correct the GeoServer SRS first before changing the frontend.
 
 ## Preview Layer
 
