@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@source not "../data";
+@import "maplibre-gl/dist/maplibre-gl.css";
 
 :root {
   --background: #ffffff;
