@@ -13,6 +13,12 @@ interface LayerInfo {
   bounds: [[number, number], [number, number]];
 }
 
+interface NdviSource {
+  path: string;
+  name: string;
+  bandCount: number | null;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -26,6 +32,8 @@ const EXTENT_SOURCE_ID = "satellite-extent";
 const EXTENT_LAYER_ID = "satellite-extent-line";
 const OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const DEFAULT_OPACITY = 70;
+const DEFAULT_RED_BAND = 3;
+const DEFAULT_NIR_BAND = 4;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,6 +41,10 @@ const DEFAULT_OPACITY = 70;
 
 function wmsUrl(layer: string) {
   return `/api/satellite-wms?layer=${encodeURIComponent(layer)}&bbox={bbox-epsg-3857}`;
+}
+
+function isNdviLayer(name: string | null) {
+  return name?.toLowerCase().startsWith("ndvi_") ?? false;
 }
 
 function extentGeoJSON(bounds: [[number, number], [number, number]]) {
@@ -70,20 +82,25 @@ export function SatelliteMap() {
 
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [activeLayer, setActiveLayer] = useState<string | null>(null);
-  const [status, setStatus] = useState("Loading layers from GeoServer…");
+  const [status, setStatus] = useState("Loading...");
   const [satelliteVisible, setSatelliteVisible] = useState(true);
   const [satelliteOpacity, setSatelliteOpacity] = useState(DEFAULT_OPACITY);
   const [publishing, setPublishing] = useState(false);
+  const [ndviSources, setNdviSources] = useState<NdviSource[]>([]);
+  const [selectedNdviSource, setSelectedNdviSource] = useState("");
+  const [redBand, setRedBand] = useState(DEFAULT_RED_BAND);
+  const [nirBand, setNirBand] = useState(DEFAULT_NIR_BAND);
+  const [ndviOutputName, setNdviOutputName] = useState("");
+  const [processingNdvi, setProcessingNdvi] = useState(false);
+  const [ndviStatus, setNdviStatus] = useState("Loading sources...");
 
   // Keep refs so map callbacks always read fresh values.
-  const opacityRef = useRef(satelliteOpacity);
-  opacityRef.current = satelliteOpacity;
-  const visibleRef = useRef(satelliteVisible);
-  visibleRef.current = satelliteVisible;
-  const activeLayerRef = useRef(activeLayer);
-  activeLayerRef.current = activeLayer;
+  const opacityRef = useRef(DEFAULT_OPACITY);
+  const visibleRef = useRef(true);
+  const activeLayerRef = useRef<string | null>(null);
 
   const activeBounds = layers.find((l) => l.name === activeLayer)?.bounds;
+  const selectedSource = ndviSources.find((s) => s.path === selectedNdviSource);
 
   // ── helpers ─────────────────────────────────────────────────────
 
@@ -147,9 +164,7 @@ export function SatelliteMap() {
       setLayers(list);
 
       if (list.length === 0) {
-        setStatus(
-          "No raster layers found — click Scan & Publish to import",
-        );
+        setStatus("No layers");
         return list;
       }
 
@@ -158,21 +173,42 @@ export function SatelliteMap() {
         !selectFirst && current && list.some((l) => l.name === current);
 
       if (currentExists) {
-        const active = list.find((l) => l.name === current)!;
-        setStatus(`Showing ${active.title}`);
+        setStatus("Ready");
       } else {
         const first = list[0];
         setActiveLayer(first.name);
         activeLayerRef.current = first.name;
-        prevLayerRef.current = first.name;
         showLayer(map, first.name, first.bounds);
-        setStatus(`Showing ${first.title}`);
+        setStatus("Ready");
       }
 
       return list;
     } catch {
-      setStatus("Could not reach GeoServer");
+      setStatus("GeoServer offline");
       return [];
+    }
+  }
+
+  async function refreshNdviSources() {
+    try {
+      const res = await fetch("/api/ndvi");
+      const data = await res.json();
+      const sources: NdviSource[] = data.sources ?? [];
+      setNdviSources(sources);
+
+      if (sources.length === 0) {
+        setNdviStatus("No sources");
+        return;
+      }
+
+      setSelectedNdviSource((current) =>
+        current && sources.some((s) => s.path === current)
+          ? current
+          : sources[0].path,
+      );
+      setNdviStatus("Sources ready");
+    } catch {
+      setNdviStatus("Source error");
     }
   }
 
@@ -242,27 +278,35 @@ export function SatelliteMap() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── React to user switching layers ──────────────────────────────
+  useEffect(() => {
+    opacityRef.current = satelliteOpacity;
+  }, [satelliteOpacity]);
 
-  const prevLayerRef = useRef<string | null>(null);
+  useEffect(() => {
+    visibleRef.current = satelliteVisible;
+  }, [satelliteVisible]);
+
+  useEffect(() => {
+    activeLayerRef.current = activeLayer;
+  }, [activeLayer]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refreshNdviSources();
+  }, []);
+
+  // ── React to user switching layers ──────────────────────────────
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !readyRef.current || !activeLayer) return;
 
-    // Skip the very first render — the map-load handler already showed it.
-    if (prevLayerRef.current === null) {
-      prevLayerRef.current = activeLayer;
-      return;
-    }
-    if (activeLayer === prevLayerRef.current) return;
-    prevLayerRef.current = activeLayer;
-
     const layer = layers.find((l) => l.name === activeLayer);
     if (!layer) return;
 
     showLayer(map, layer.name, layer.bounds);
-    setStatus(`Showing ${layer.title}`);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatus("Ready");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLayer, layers]);
 
@@ -291,7 +335,7 @@ export function SatelliteMap() {
     if (!map || !readyRef.current) return;
 
     setPublishing(true);
-    setStatus("Scanning /data and publishing to GeoServer…");
+    setStatus("Publishing...");
 
     try {
       const pubRes = await fetch("/api/geoserver-publish", {
@@ -306,120 +350,250 @@ export function SatelliteMap() {
       const newLayers = await refreshLayers(map, false);
 
       if (created > 0) {
-        setStatus(
-          `Published ${created} new layer(s) — ${newLayers.length} total`,
-        );
+        setStatus(`Published ${created}`);
       } else if (errors > 0) {
-        setStatus(`${errors} layer(s) failed to publish`);
+        setStatus("Publish failed");
       } else {
-        setStatus(
-          `All layers already published (${newLayers.length} total)`,
-        );
+        setStatus(`Ready (${newLayers.length})`);
       }
     } catch {
-      setStatus("Failed to publish — is GeoServer running?");
+      setStatus("Publish failed");
     } finally {
       setPublishing(false);
+    }
+  }
+
+  async function handleCreateNdvi() {
+    const map = mapRef.current;
+    if (!map || !readyRef.current || !selectedNdviSource) return;
+
+    setProcessingNdvi(true);
+    setNdviStatus("Creating...");
+    setStatus("Creating NDVI...");
+
+    try {
+      const ndviRes = await fetch("/api/ndvi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: selectedNdviSource,
+          redBand,
+          nirBand,
+          outputName: ndviOutputName.trim() || undefined,
+        }),
+      });
+      const ndviData = await ndviRes.json();
+
+      if (!ndviRes.ok) {
+        throw new Error(ndviData.error ?? "Failed to create NDVI");
+      }
+
+      setNdviStatus("NDVI created");
+      setStatus("Publishing...");
+
+      const pubRes = await fetch("/api/geoserver-publish", {
+        method: "POST",
+      });
+      if (!pubRes.ok) throw new Error("Failed to publish NDVI");
+
+      const newLayers = await refreshLayers(map, false);
+      const ndviLayer = newLayers.find((l) => l.name === ndviData.layerName);
+      if (ndviLayer) {
+        setActiveLayer(ndviLayer.name);
+        activeLayerRef.current = ndviLayer.name;
+        showLayer(map, ndviLayer.name, ndviLayer.bounds);
+        setStatus("NDVI ready");
+      } else {
+        setStatus("Refresh needed");
+      }
+
+      setNdviOutputName("");
+      refreshNdviSources();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to create NDVI";
+      setNdviStatus(message);
+      setStatus(message);
+    } finally {
+      setProcessingNdvi(false);
     }
   }
 
   // ── Render ──────────────────────────────────────────────────────
 
   return (
-    <section className="flex min-h-[560px] flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
-        <div>
-          <h2 className="text-sm font-semibold text-slate-950">
-            Satellite layer
-          </h2>
-          <p className="text-xs text-slate-500">
-            OpenStreetMap base with GeoServer WMS raster from local /data
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Layer selector — only rendered when there are multiple layers */}
-          {layers.length > 1 && (
-            <select
-              aria-label="Select satellite layer"
-              className="h-8 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-700"
-              value={activeLayer ?? ""}
-              onChange={(e) => setActiveLayer(e.target.value)}
-            >
-              {layers.map((l) => (
-                <option key={l.name} value={l.name}>
-                  {l.title}
-                </option>
-              ))}
-            </select>
+    <section className="flex min-h-[calc(100vh-86px)] flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-3 py-2">
+        <span className="w-11 text-xs font-semibold uppercase text-slate-500">
+          Layer
+        </span>
+        <select
+          aria-label="Select satellite layer"
+          className="h-8 min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-700 disabled:opacity-40 sm:max-w-lg"
+          disabled={layers.length === 0}
+          value={activeLayer ?? ""}
+          onChange={(e) => setActiveLayer(e.target.value)}
+        >
+          {layers.length === 0 ? (
+            <option value="">No layers</option>
+          ) : (
+            layers.map((l) => (
+              <option key={l.name} value={l.name}>
+                {l.title}
+              </option>
+            ))
           )}
+        </select>
 
-          {/* Auto-publish GeoTIFFs from /data */}
-          <button
-            className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:opacity-40"
-            disabled={publishing}
-            type="button"
-            onClick={handlePublish}
-          >
-            {publishing ? "Publishing…" : "📡 Scan & Publish"}
-          </button>
+        <button
+          className="h-8 rounded-md border border-slate-300 px-3 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:opacity-40"
+          disabled={publishing}
+          type="button"
+          onClick={handlePublish}
+        >
+          {publishing ? "Publishing..." : "Scan"}
+        </button>
 
-          <label className="inline-flex h-8 items-center gap-2 rounded-md bg-slate-100 px-3 text-xs font-medium text-slate-700">
-            <input
-              checked={satelliteVisible}
-              className="h-4 w-4 accent-slate-950"
-              type="checkbox"
-              onChange={(e) => setSatelliteVisible(e.target.checked)}
-            />
-            Satellite
-          </label>
+        <label className="inline-flex h-8 items-center gap-2 rounded-md bg-slate-100 px-3 text-xs font-medium text-slate-700">
+          <input
+            checked={satelliteVisible}
+            className="h-4 w-4 accent-slate-950"
+            type="checkbox"
+            onChange={(e) => setSatelliteVisible(e.target.checked)}
+          />
+          Satellite
+        </label>
 
-          <label className="flex min-w-56 items-center gap-2 rounded-md bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700">
-            <span>Opacity</span>
-            <input
-              aria-label="Satellite opacity"
-              className="h-2 w-24 accent-slate-950 disabled:opacity-40"
-              disabled={!satelliteVisible}
-              max="100"
-              min="20"
-              step="5"
-              type="range"
-              value={satelliteOpacity}
-              onChange={(e) =>
-                setClampedOpacity(Number(e.target.value))
-              }
-            />
-            <input
-              aria-label="Satellite opacity percent"
-              className="h-6 w-12 rounded border border-slate-300 bg-white px-1 text-right tabular-nums text-slate-800 disabled:opacity-40"
-              disabled={!satelliteVisible}
-              max="100"
-              min="20"
-              step="5"
-              type="number"
-              value={satelliteOpacity}
-              onChange={(e) =>
-                setClampedOpacity(Number(e.target.value))
-              }
-            />
-            <span>%</span>
-          </label>
+        <label className="flex h-8 items-center gap-2 rounded-md bg-slate-100 px-2 text-xs font-medium text-slate-700">
+          <span>Opacity</span>
+          <input
+            aria-label="Satellite opacity"
+            className="h-2 w-24 accent-slate-950 disabled:opacity-40"
+            disabled={!satelliteVisible}
+            max="100"
+            min="20"
+            step="5"
+            type="range"
+            value={satelliteOpacity}
+            onChange={(e) => setClampedOpacity(Number(e.target.value))}
+          />
+          <input
+            aria-label="Satellite opacity percent"
+            className="h-6 w-12 rounded border border-slate-300 bg-white px-1 text-right tabular-nums text-slate-800 disabled:opacity-40"
+            disabled={!satelliteVisible}
+            max="100"
+            min="20"
+            step="5"
+            type="number"
+            value={satelliteOpacity}
+            onChange={(e) => setClampedOpacity(Number(e.target.value))}
+          />
+        </label>
 
-          <button
-            className="rounded-md bg-slate-950 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
-            disabled={!activeBounds}
-            type="button"
-            onClick={() => activeBounds && fitToBounds(activeBounds)}
-          >
-            Zoom to satellite
-          </button>
+        <button
+          className="h-8 rounded-md bg-slate-950 px-3 text-xs font-medium text-white transition hover:bg-slate-800 disabled:opacity-40"
+          disabled={!activeBounds}
+          type="button"
+          onClick={() => activeBounds && fitToBounds(activeBounds)}
+        >
+          Zoom
+        </button>
 
-          <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-            {status}
-          </div>
+        <div
+          aria-live="polite"
+          className="ml-auto max-w-44 truncate rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700"
+        >
+          {status}
         </div>
       </div>
-      <div ref={containerRef} className="min-h-[520px] flex-1" />
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+        <span className="w-11 text-xs font-semibold uppercase text-slate-500">
+          NDVI
+        </span>
+        <select
+          aria-label="Select NDVI source GeoTIFF"
+          className="h-8 min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-700 disabled:opacity-40 sm:max-w-2xl"
+          disabled={processingNdvi || ndviSources.length === 0}
+          value={selectedNdviSource}
+          onChange={(e) => setSelectedNdviSource(e.target.value)}
+        >
+          {ndviSources.length === 0 ? (
+            <option value="">No GeoTIFF sources</option>
+          ) : (
+            ndviSources.map((source) => (
+              <option key={source.path} value={source.path}>
+                {source.path}
+              </option>
+            ))
+          )}
+        </select>
+
+        <label className="inline-flex h-8 items-center gap-2 rounded-md bg-white px-2 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+          Red
+          <input
+            aria-label="Red band"
+            className="h-6 w-12 rounded border border-slate-300 px-1 text-right tabular-nums"
+            disabled={processingNdvi}
+            min="1"
+            type="number"
+            value={redBand}
+            onChange={(e) => setRedBand(Number(e.target.value))}
+          />
+        </label>
+
+        <label className="inline-flex h-8 items-center gap-2 rounded-md bg-white px-2 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+          NIR
+          <input
+            aria-label="NIR band"
+            className="h-6 w-12 rounded border border-slate-300 px-1 text-right tabular-nums"
+            disabled={processingNdvi}
+            min="1"
+            type="number"
+            value={nirBand}
+            onChange={(e) => setNirBand(Number(e.target.value))}
+          />
+        </label>
+
+        <input
+          aria-label="NDVI output name"
+          className="h-8 w-40 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-700 disabled:opacity-40"
+          disabled={processingNdvi}
+          placeholder="Name"
+          value={ndviOutputName}
+          onChange={(e) => setNdviOutputName(e.target.value)}
+        />
+
+        <button
+          className="h-8 rounded-md bg-emerald-700 px-3 text-xs font-medium text-white transition hover:bg-emerald-800 disabled:opacity-40"
+          disabled={
+            processingNdvi ||
+            ndviSources.length === 0 ||
+            redBand < 1 ||
+            nirBand < 1 ||
+            redBand === nirBand
+          }
+          type="button"
+          onClick={handleCreateNdvi}
+        >
+          {processingNdvi ? "Creating..." : "Create NDVI"}
+        </button>
+
+        <div className="max-w-40 truncate rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+          {selectedSource?.bandCount
+            ? `${selectedSource.bandCount} bands`
+            : ndviStatus}
+        </div>
+
+        {isNdviLayer(activeLayer) && (
+          <div className="ml-auto flex items-center gap-2 text-xs font-medium text-slate-600">
+            <span>-1</span>
+            <div className="h-2 w-28 rounded-full bg-gradient-to-r from-slate-400 via-yellow-300 to-emerald-800" />
+            <span>1</span>
+          </div>
+        )}
+      </div>
+      <div ref={containerRef} className="min-h-[560px] flex-1" />
     </section>
   );
 }

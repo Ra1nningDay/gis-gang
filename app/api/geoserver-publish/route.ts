@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { readdir } from "fs/promises";
-import { join, relative, basename } from "path";
+import { basename, join, relative } from "path";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +9,37 @@ const AUTH_HEADER =
   "Basic " + Buffer.from("admin:geoserver").toString("base64");
 const WORKSPACE = "lab";
 const DATA_DIR = join(process.cwd(), "data");
+const NDVI_STYLE = "ndvi";
+const NDVI_SLD = `<?xml version="1.0" encoding="UTF-8"?>
+<StyledLayerDescriptor version="1.0.0"
+  xmlns="http://www.opengis.net/sld"
+  xmlns:ogc="http://www.opengis.net/ogc"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.opengis.net/sld StyledLayerDescriptor.xsd">
+  <NamedLayer>
+    <Name>ndvi</Name>
+    <UserStyle>
+      <Title>NDVI</Title>
+      <FeatureTypeStyle>
+        <Rule>
+          <RasterSymbolizer>
+            <Opacity>1.0</Opacity>
+            <ColorMap type="ramp">
+              <ColorMapEntry color="#0f172a" quantity="-9999" opacity="0" label="No data"/>
+              <ColorMapEntry color="#9ca3af" quantity="-0.2" label="Water / shadow"/>
+              <ColorMapEntry color="#f8fafc" quantity="0" label="Bare ground"/>
+              <ColorMapEntry color="#facc15" quantity="0.2" label="Low vegetation"/>
+              <ColorMapEntry color="#84cc16" quantity="0.4" label="Moderate vegetation"/>
+              <ColorMapEntry color="#15803d" quantity="0.7" label="Dense vegetation"/>
+              <ColorMapEntry color="#064e3b" quantity="1" label="Very dense vegetation"/>
+            </ColorMap>
+          </RasterSymbolizer>
+        </Rule>
+      </FeatureTypeStyle>
+    </UserStyle>
+  </NamedLayer>
+</StyledLayerDescriptor>`;
 
 interface PublishResult {
   name: string;
@@ -29,7 +60,7 @@ export async function POST() {
     // Ensure the workspace exists before publishing.
     await ensureWorkspace();
 
-    // Recursively discover .tif files under ./data
+    // Recursively discover GeoTIFF files under ./data
     const tifFiles = await findTifFiles(DATA_DIR);
 
     if (tifFiles.length === 0) {
@@ -46,7 +77,7 @@ export async function POST() {
     for (const hostPath of tifFiles) {
       const relPath = relative(DATA_DIR, hostPath).replace(/\\/g, "/");
       const containerPath = `/data/${relPath}`;
-      const nativeName = basename(hostPath, ".tif");
+      const nativeName = basenameWithoutGeoTiffExtension(hostPath);
       const storeName = sanitizeName(nativeName);
 
       const result = await publishGeoTIFF(containerPath, storeName, nativeName);
@@ -98,7 +129,7 @@ async function findTifFiles(dir: string): Promise<string[]> {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
         files.push(...(await findTifFiles(fullPath)));
-      } else if (entry.isFile() && entry.name.endsWith(".tif")) {
+      } else if (entry.isFile() && isGeoTiff(entry.name)) {
         files.push(fullPath);
       }
     }
@@ -112,6 +143,18 @@ async function findTifFiles(dir: string): Promise<string[]> {
 /** Replace characters that are problematic in GeoServer identifiers. */
 function sanitizeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
+function isGeoTiff(name: string): boolean {
+  return name.toLowerCase().endsWith(".tif") || name.toLowerCase().endsWith(".tiff");
+}
+
+function basenameWithoutGeoTiffExtension(path: string): string {
+  return basename(path).replace(/\.tiff?$/i, "");
+}
+
+function isNdviLayer(name: string): boolean {
+  return name.toLowerCase().startsWith("ndvi_");
 }
 
 /**
@@ -134,6 +177,11 @@ async function publishGeoTIFF(
   );
 
   if (checkRes.ok) {
+    if (isNdviLayer(storeName)) {
+      await ensureNdviStyle();
+      await setLayerDefaultStyle(storeName, NDVI_STYLE);
+    }
+
     return {
       name: storeName,
       file: containerPath,
@@ -201,6 +249,51 @@ async function publishGeoTIFF(
     };
   }
 
+  if (isNdviLayer(storeName)) {
+    await ensureNdviStyle();
+    await setLayerDefaultStyle(storeName, NDVI_STYLE);
+  }
+
   return { name: storeName, file: containerPath, status: "created" };
 }
 
+async function ensureNdviStyle() {
+  const checkRes = await fetch(
+    `${GEOSERVER_REST}/workspaces/${WORKSPACE}/styles/${NDVI_STYLE}.json`,
+    {
+      headers: { Authorization: AUTH_HEADER },
+      cache: "no-store",
+    },
+  );
+  if (checkRes.ok) return;
+
+  await fetch(
+    `${GEOSERVER_REST}/workspaces/${WORKSPACE}/styles?name=${NDVI_STYLE}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: AUTH_HEADER,
+        "Content-Type": "application/vnd.ogc.sld+xml",
+      },
+      body: NDVI_SLD,
+    },
+  );
+}
+
+async function setLayerDefaultStyle(layerName: string, styleName: string) {
+  await fetch(`${GEOSERVER_REST}/layers/${WORKSPACE}:${layerName}`, {
+    method: "PUT",
+    headers: {
+      Authorization: AUTH_HEADER,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      layer: {
+        defaultStyle: {
+          name: styleName,
+          workspace: WORKSPACE,
+        },
+      },
+    }),
+  });
+}

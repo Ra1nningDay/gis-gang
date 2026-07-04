@@ -66,6 +66,32 @@ Use the **Satellite** toggle and **Opacity** control to compare the raster with 
 
 The dashed orange box shows the GeoTIFF extent.
 
+## Create NDVI from Red and NIR Bands
+
+The app can create an NDVI GeoTIFF from an existing multispectral GeoTIFF in
+`data/`:
+
+1. Start Docker Desktop.
+2. Start GeoServer with `docker compose up -d`.
+3. Start the app with `pnpm dev`.
+4. In the `NDVI` toolbar, select a source GeoTIFF.
+5. Set the Red and NIR band numbers for that image.
+6. Click `Create NDVI`.
+
+The app runs GDAL through Docker, writes the result to `data/derived/`, then
+uses the existing `Scan & Publish` flow to publish the new `ndvi_*` layer to
+GeoServer. NDVI layers receive a default color ramp style in GeoServer.
+
+NDVI uses:
+
+```text
+(NIR - Red) / (NIR + Red)
+```
+
+The default inputs are Red band `3` and NIR band `4`, but verify the actual
+band order for each source image before processing. The app does not infer the
+band mapping from the file name.
+
 ## Seed Data
 
 PostGIS runs the SQL files inside the `init/` folder when the database volume is created for the first time.
