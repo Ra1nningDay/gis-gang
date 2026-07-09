@@ -19,6 +19,13 @@ interface NdviSource {
   bandCount: number | null;
 }
 
+type LngLatPosition = [number, number];
+
+interface AoiPolygon {
+  type: "Polygon";
+  coordinates: LngLatPosition[][];
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -30,6 +37,11 @@ const WMS_SOURCE_ID = "satellite-wms";
 const WMS_LAYER_ID = "satellite-wms-raster";
 const EXTENT_SOURCE_ID = "satellite-extent";
 const EXTENT_LAYER_ID = "satellite-extent-line";
+const AOI_AREA_SOURCE_ID = "aoi-area";
+const AOI_FILL_LAYER_ID = "aoi-fill";
+const AOI_LINE_LAYER_ID = "aoi-line";
+const AOI_POINTS_SOURCE_ID = "aoi-points";
+const AOI_POINTS_LAYER_ID = "aoi-points-circle";
 const OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const DEFAULT_OPACITY = 70;
 const DEFAULT_RED_BAND = 3;
@@ -71,6 +83,58 @@ function extentGeoJSON(bounds: [[number, number], [number, number]]) {
   };
 }
 
+function closeRing(points: LngLatPosition[]) {
+  const ring = [...points];
+  const first = ring[0];
+  const last = ring.at(-1);
+
+  if (first && last && (first[0] !== last[0] || first[1] !== last[1])) {
+    ring.push(first);
+  }
+
+  return ring;
+}
+
+function aoiPolygon(points: LngLatPosition[]): AoiPolygon | null {
+  if (points.length < 3) return null;
+
+  return {
+    type: "Polygon",
+    coordinates: [closeRing(points)],
+  };
+}
+
+function aoiAreaGeoJSON(points: LngLatPosition[]) {
+  const polygon = aoiPolygon(points);
+
+  return {
+    type: "FeatureCollection" as const,
+    features: polygon
+      ? [
+          {
+            type: "Feature" as const,
+            properties: {},
+            geometry: polygon,
+          },
+        ]
+      : [],
+  };
+}
+
+function aoiPointsGeoJSON(points: LngLatPosition[]) {
+  return {
+    type: "FeatureCollection" as const,
+    features: points.map((point, index) => ({
+      type: "Feature" as const,
+      properties: { index: index + 1 },
+      geometry: {
+        type: "Point" as const,
+        coordinates: point,
+      },
+    })),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -93,14 +157,19 @@ export function SatelliteMap() {
   const [ndviOutputName, setNdviOutputName] = useState("");
   const [processingNdvi, setProcessingNdvi] = useState(false);
   const [ndviStatus, setNdviStatus] = useState("Loading sources...");
+  const [drawingAoi, setDrawingAoi] = useState(false);
+  const [aoiPoints, setAoiPoints] = useState<LngLatPosition[]>([]);
 
   // Keep refs so map callbacks always read fresh values.
   const opacityRef = useRef(DEFAULT_OPACITY);
   const visibleRef = useRef(true);
   const activeLayerRef = useRef<string | null>(null);
+  const drawingAoiRef = useRef(false);
+  const aoiPointsRef = useRef<LngLatPosition[]>([]);
 
   const activeBounds = layers.find((l) => l.name === activeLayer)?.bounds;
   const selectedSource = ndviSources.find((s) => s.path === selectedNdviSource);
+  const selectedAoi = aoiPolygon(aoiPoints);
 
   // ── helpers ─────────────────────────────────────────────────────
 
@@ -146,6 +215,39 @@ export function SatelliteMap() {
     }
 
     fitToBounds(bounds);
+  }
+
+  function updateAoiOverlay(map: Map, points: LngLatPosition[]) {
+    const areaSource = map.getSource(AOI_AREA_SOURCE_ID);
+    if (areaSource && "setData" in areaSource) {
+      (areaSource as maplibregl.GeoJSONSource).setData(aoiAreaGeoJSON(points));
+    }
+
+    const pointsSource = map.getSource(AOI_POINTS_SOURCE_ID);
+    if (pointsSource && "setData" in pointsSource) {
+      (pointsSource as maplibregl.GeoJSONSource).setData(
+        aoiPointsGeoJSON(points),
+      );
+    }
+  }
+
+  function clearAoi() {
+    setAoiPoints([]);
+    aoiPointsRef.current = [];
+    setDrawingAoi(false);
+    const map = mapRef.current;
+    if (map && readyRef.current) updateAoiOverlay(map, []);
+    setNdviStatus("AOI cleared");
+  }
+
+  function finishAoi() {
+    if (aoiPointsRef.current.length < 3) {
+      setNdviStatus("AOI needs 3+ points");
+      return;
+    }
+
+    setDrawingAoi(false);
+    setNdviStatus("AOI ready");
   }
 
   /**
@@ -266,8 +368,63 @@ export function SatelliteMap() {
         },
       });
 
+      map.addSource(AOI_AREA_SOURCE_ID, {
+        type: "geojson",
+        data: aoiAreaGeoJSON([]),
+      });
+      map.addLayer({
+        id: AOI_FILL_LAYER_ID,
+        type: "fill",
+        source: AOI_AREA_SOURCE_ID,
+        paint: {
+          "fill-color": "#22c55e",
+          "fill-opacity": 0.18,
+        },
+      });
+      map.addLayer({
+        id: AOI_LINE_LAYER_ID,
+        type: "line",
+        source: AOI_AREA_SOURCE_ID,
+        paint: {
+          "line-color": "#16a34a",
+          "line-width": 3,
+        },
+      });
+      map.addSource(AOI_POINTS_SOURCE_ID, {
+        type: "geojson",
+        data: aoiPointsGeoJSON([]),
+      });
+      map.addLayer({
+        id: AOI_POINTS_LAYER_ID,
+        type: "circle",
+        source: AOI_POINTS_SOURCE_ID,
+        paint: {
+          "circle-color": "#ffffff",
+          "circle-radius": 5,
+          "circle-stroke-color": "#16a34a",
+          "circle-stroke-width": 2,
+        },
+      });
+
       readyRef.current = true;
       refreshLayers(map, true);
+    });
+
+    map.on("click", (event) => {
+      if (!drawingAoiRef.current) return;
+
+      const nextPoints: LngLatPosition[] = [
+        ...aoiPointsRef.current,
+        [event.lngLat.lng, event.lngLat.lat],
+      ];
+      aoiPointsRef.current = nextPoints;
+      setAoiPoints(nextPoints);
+      updateAoiOverlay(map, nextPoints);
+      setNdviStatus(
+        nextPoints.length < 3
+          ? `AOI ${nextPoints.length}/3 points`
+          : "AOI can be finished",
+      );
     });
 
     return () => {
@@ -289,6 +446,18 @@ export function SatelliteMap() {
   useEffect(() => {
     activeLayerRef.current = activeLayer;
   }, [activeLayer]);
+
+  useEffect(() => {
+    drawingAoiRef.current = drawingAoi;
+    const canvas = mapRef.current?.getCanvas();
+    if (canvas) canvas.style.cursor = drawingAoi ? "crosshair" : "";
+  }, [drawingAoi]);
+
+  useEffect(() => {
+    aoiPointsRef.current = aoiPoints;
+    const map = mapRef.current;
+    if (map && readyRef.current) updateAoiOverlay(map, aoiPoints);
+  }, [aoiPoints]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -380,6 +549,7 @@ export function SatelliteMap() {
           redBand,
           nirBand,
           outputName: ndviOutputName.trim() || undefined,
+          aoi: selectedAoi ?? undefined,
         }),
       });
       const ndviData = await ndviRes.json();
@@ -579,10 +749,42 @@ export function SatelliteMap() {
           {processingNdvi ? "Creating..." : "Create NDVI"}
         </button>
 
+        <button
+          className="h-8 rounded-md border border-emerald-600 px-3 text-xs font-medium text-emerald-800 transition hover:bg-emerald-50 disabled:opacity-40"
+          disabled={processingNdvi}
+          type="button"
+          onClick={() => {
+            setDrawingAoi((current) => !current);
+            setNdviStatus(drawingAoi ? "AOI paused" : "Click map points");
+          }}
+        >
+          {drawingAoi ? "Pause AOI" : "Draw AOI"}
+        </button>
+
+        <button
+          className="h-8 rounded-md border border-slate-300 px-3 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-white disabled:opacity-40"
+          disabled={processingNdvi || aoiPoints.length < 3}
+          type="button"
+          onClick={finishAoi}
+        >
+          Finish
+        </button>
+
+        <button
+          className="h-8 rounded-md border border-slate-300 px-3 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-white disabled:opacity-40"
+          disabled={processingNdvi || aoiPoints.length === 0}
+          type="button"
+          onClick={clearAoi}
+        >
+          Clear
+        </button>
+
         <div className="max-w-40 truncate rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
-          {selectedSource?.bandCount
-            ? `${selectedSource.bandCount} bands`
-            : ndviStatus}
+          {selectedAoi
+            ? `AOI ${aoiPoints.length} pts`
+            : selectedSource?.bandCount
+              ? `${selectedSource.bandCount} bands`
+              : ndviStatus}
         </div>
 
         {isNdviLayer(activeLayer) && (

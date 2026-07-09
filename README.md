@@ -76,11 +76,14 @@ The app can create an NDVI GeoTIFF from an existing multispectral GeoTIFF in
 3. Start the app with `pnpm dev`.
 4. In the `NDVI` toolbar, select a source GeoTIFF.
 5. Set the Red and NIR band numbers for that image.
-6. Click `Create NDVI`.
+6. Optional: click `Draw AOI`, draw a polygon on the map, then click `Finish`.
+7. Click `Create NDVI`.
 
 The app runs GDAL through Docker, writes the result to `data/derived/`, then
 uses the existing `Scan & Publish` flow to publish the new `ndvi_*` layer to
 GeoServer. NDVI layers receive a default color ramp style in GeoServer.
+When an AOI polygon is drawn, the app crops the NDVI output to that polygon
+before publishing it.
 
 NDVI uses:
 

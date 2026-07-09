@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
-import { mkdir, readdir, readFile, stat } from "fs/promises";
+import { randomUUID } from "crypto";
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from "fs/promises";
 import { basename, extname, join, relative, resolve, sep } from "path";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -21,6 +22,14 @@ interface CreateNdviRequest {
   redBand: number;
   nirBand: number;
   outputName?: string;
+  aoi?: unknown;
+}
+
+type LngLatPosition = [number, number];
+
+interface AoiPolygon {
+  type: "Polygon";
+  coordinates: LngLatPosition[][];
 }
 
 export async function GET() {
@@ -62,6 +71,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const aoi = validateAoiPolygon(body.aoi);
+  if (aoi === false) {
+    return NextResponse.json(
+      { error: "AOI must be a valid GeoJSON Polygon in longitude/latitude." },
+      { status: 400 },
+    );
+  }
+
   try {
     const sourceStats = await stat(sourcePath);
     if (!sourceStats.isFile()) throw new Error("Source is not a file.");
@@ -79,6 +96,14 @@ export async function POST(request: NextRequest) {
   );
   const outputFile = `${outputBase}.tif`;
   const outputPath = join(DERIVED_DIR, outputFile);
+  const tempId = randomUUID().replace(/-/g, "");
+  const calcOutputFile = aoi ? `${outputBase}_calc_${tempId}.tif` : outputFile;
+  const calcOutputPath = join(DERIVED_DIR, calcOutputFile);
+  const aoiFile = aoi ? `${outputBase}_aoi_${tempId}.geojson` : null;
+  const aoiPath = aoiFile ? join(DERIVED_DIR, aoiFile) : null;
+  const cleanupPaths = [aoiPath, aoi ? calcOutputPath : null].filter(
+    (path): path is string => Boolean(path),
+  );
 
   try {
     await stat(outputPath);
@@ -91,9 +116,26 @@ export async function POST(request: NextRequest) {
   }
 
   const sourceInContainer = `/data/${toPosixPath(relative(DATA_DIR, sourcePath))}`;
-  const outputInContainer = `/data/derived/${outputFile}`;
+  const calcOutputInContainer = `/data/derived/${calcOutputFile}`;
 
-  const result = await runGdalCalc([
+  if (aoiPath && aoi) {
+    await writeFile(
+      aoiPath,
+      JSON.stringify({
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: {},
+            geometry: aoi,
+          },
+        ],
+      }),
+      "utf8",
+    );
+  }
+
+  const result = await runDocker([
     "run",
     "--rm",
     "-v",
@@ -106,7 +148,7 @@ export async function POST(request: NextRequest) {
     "-B",
     sourceInContainer,
     `--B_band=${body.redBand}`,
-    `--outfile=${outputInContainer}`,
+    `--outfile=${calcOutputInContainer}`,
     "--type=Float32",
     "--NoDataValue=-9999",
     "--calc=numpy.where((A+B)==0,-9999,(A.astype(numpy.float32)-B.astype(numpy.float32))/(A+B))",
@@ -116,6 +158,7 @@ export async function POST(request: NextRequest) {
   ]);
 
   if (result.exitCode !== 0) {
+    await cleanupFiles(cleanupPaths);
     return NextResponse.json(
       {
         error: "GDAL failed to create the NDVI GeoTIFF.",
@@ -123,6 +166,45 @@ export async function POST(request: NextRequest) {
       },
       { status: 500 },
     );
+  }
+
+  if (aoi && aoiFile) {
+    const warpResult = await runDocker([
+      "run",
+      "--rm",
+      "-v",
+      `${DATA_DIR}:/data`,
+      GDAL_IMAGE,
+      "gdalwarp",
+      "-cutline",
+      `/data/derived/${aoiFile}`,
+      "-cutline_srs",
+      "EPSG:4326",
+      "-crop_to_cutline",
+      "-dstnodata",
+      "-9999",
+      "-co",
+      "TILED=YES",
+      "-co",
+      "COMPRESS=DEFLATE",
+      "-co",
+      "BIGTIFF=IF_SAFER",
+      calcOutputInContainer,
+      `/data/derived/${outputFile}`,
+    ]);
+
+    await cleanupFiles(cleanupPaths);
+
+    if (warpResult.exitCode !== 0) {
+      await cleanupFiles([outputPath]);
+      return NextResponse.json(
+        {
+          error: "GDAL failed to crop the NDVI GeoTIFF to the AOI.",
+          detail: warpResult.stderr || warpResult.stdout,
+        },
+        { status: 500 },
+      );
+    }
   }
 
   return NextResponse.json({
@@ -195,6 +277,58 @@ function isPositiveInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) > 0;
 }
 
+function validateAoiPolygon(value: unknown): AoiPolygon | null | false {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || value.type !== "Polygon") return false;
+  if (!Array.isArray(value.coordinates) || value.coordinates.length !== 1) {
+    return false;
+  }
+
+  const ring = value.coordinates[0];
+  if (!Array.isArray(ring) || ring.length < 4) return false;
+
+  const positions: LngLatPosition[] = [];
+  for (const position of ring) {
+    if (!Array.isArray(position) || position.length < 2) return false;
+
+    const [lng, lat] = position;
+    if (
+      typeof lng !== "number" ||
+      typeof lat !== "number" ||
+      !Number.isFinite(lng) ||
+      !Number.isFinite(lat) ||
+      lng < -180 ||
+      lng > 180 ||
+      lat < -90 ||
+      lat > 90
+    ) {
+      return false;
+    }
+
+    positions.push([lng, lat]);
+  }
+
+  const first = positions[0];
+  const last = positions.at(-1);
+  if (!first || !last || first[0] !== last[0] || first[1] !== last[1]) {
+    return false;
+  }
+
+  const uniqueVertices = new Set(
+    positions.slice(0, -1).map(([lng, lat]) => `${lng},${lat}`),
+  );
+  if (uniqueVertices.size < 3) return false;
+
+  return {
+    type: "Polygon",
+    coordinates: [positions],
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function defaultOutputName(source: string, nirBand: number, redBand: number) {
   return `ndvi_${basename(source, extname(source))}_nir${nirBand}_red${redBand}`;
 }
@@ -209,7 +343,19 @@ function toPosixPath(path: string) {
   return path.replace(/\\/g, "/");
 }
 
-async function runGdalCalc(args: string[]) {
+async function cleanupFiles(paths: string[]) {
+  await Promise.all(
+    paths.map(async (path) => {
+      try {
+        await unlink(path);
+      } catch {
+        // Temporary cleanup is best-effort.
+      }
+    }),
+  );
+}
+
+async function runDocker(args: string[]) {
   return new Promise<{ exitCode: number | null; stdout: string; stderr: string }>(
     (resolveProcess) => {
       const child = spawn("docker", args, { windowsHide: true });
